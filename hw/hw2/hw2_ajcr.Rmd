@@ -141,7 +141,10 @@ variance of $\hat{\mu}$).
 
 #### Exercise 
 Suppose that (unknown to us) the true mean IQ score $\mu^*$ in the town was quite high, $\mu^* = 112$. 	Calculate the bias, variance and MSE of the Bayes and ML estimators. Which estimator has a larger bias? Which estimator has a larger MSE?  
-Hint (based on a commonly made mistake): $E_{\bm{y}}(\hat{\mu}_{Bayes}|\mu^*) \neq \hat{\mu}_{Bayes}$, you need to get the expected value w.r.t. the data $\bm{y}$. 
+Hint (based on a commonly made mistake): $E_{\bm{y}}(\hat{\mu}_{Bayes}|\mu^*) \neq \hat{\mu}_{Bayes}$, you need to get the expected value w.r.t. the data $\bm{y}$.  
+
+**Answer:**
+
 	
 Optional: Consider  
 (i) plotting the sampling distributions for both the Bayes estimator as well as the MLE.  
