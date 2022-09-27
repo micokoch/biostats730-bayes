@@ -1,7 +1,7 @@
 ---
 title: "Applied Bayesian modeling - HW2"
 author: "Álvaro J. Castro Rivadeneira"
-date: "September 16, 2022"
+date: "September 21, 2022"
 header-includes:
     - \usepackage{bm}
 output:
@@ -22,6 +22,7 @@ You can add the answers to other exercises in the same markdown file or create t
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(brms)
+library(scales)
 ```
 
 ## Exercise 1: Derivation of a posterior using Bayes' rule  [3 pts]
@@ -143,12 +144,294 @@ variance of $\hat{\mu}$).
 Suppose that (unknown to us) the true mean IQ score $\mu^*$ in the town was quite high, $\mu^* = 112$. 	Calculate the bias, variance and MSE of the Bayes and ML estimators. Which estimator has a larger bias? Which estimator has a larger MSE?  
 Hint (based on a commonly made mistake): $E_{\bm{y}}(\hat{\mu}_{Bayes}|\mu^*) \neq \hat{\mu}_{Bayes}$, you need to get the expected value w.r.t. the data $\bm{y}$.  
 
-**Answer:**
+**Answer:**  
+I will use the previously given information that the prior mean is $m_0 = 100$ and $s_{mu 0} = \sigma = 15$.
 
-	
+**Bayesian Estimator**  
+*Bias*  
+$$E_{\pmb{y}}[\hat{\mu}|\mu^*] = \frac{1/s_{\mu 0}^2}{1/s_{\mu 0}^2 + n/\sigma^2}m_0 + \frac{n/\sigma^2}{1/s_{\mu 0}^2 + n/\sigma^2}\bar y$$
+$$E_{\pmb{y}}[\hat{\mu}|\mu^*] = \frac{1/225}{1/225 + n/225}100 + \frac{n/225}{1/225 + n/225}\bar y = \frac{100}{n+1} + \frac{n \cdot \bar y}{n+1}$$
+```{r}
+bayes_exp_mu <- function(n, ybar){(100/(n+1)) + (n*ybar/(n+1))}
+(bayes_exp_mu(10, 113))
+(bayes_exp_mu(1000, 113))
+(bayes_exp_mu(1, 113))
+(bayes_exp_mu(10, 133))
+(bayes_exp_mu(1000, 133))
+(bayes_exp_mu(1, 133))
+(bayes_exp_mu(1000, 112))
+```
+
+
+As $n$ increases, the expected value approximates $\bar y$ although it never quite reaches it. When $n$ is small, the expected value is closer to the prior. Since $\mu^*$ is a fixed value and not a random variable, the bias becomes:  
+
+$$Bias(\hat{\mu})^ = E_{\pmb{y}}[\hat{\mu}|\mu^*] - \mu^* = \frac{100+n \cdot \bar y}{n+1} - 112 = \frac{100+n \cdot \bar y - 112n - 112}{n + 1}$$
+$$Bias(\hat{\mu})^ = \frac{n (\bar y - 112) - 12}{n+1}$$
+```{r}
+bayes_bias_mu <- function(n, ybar){((n*(ybar-112))-12)/(n+1)}
+(bayes_bias_mu(10, 113))
+(bayes_bias_mu(1000, 113))
+(bayes_bias_mu(1, 113))
+(bayes_bias_mu(10, 133))
+(bayes_bias_mu(1000, 133))
+(bayes_bias_mu(1, 133))
+(bayes_bias_mu(10, 112))
+(bayes_bias_mu(1000, 112))
+(bayes_bias_mu(1, 112))
+(bayes_bias_mu(10, 224))
+(bayes_bias_mu(1000, 224))
+(bayes_bias_mu(1, 224))
+(bayes_bias_mu(12, 113))
+(bayes_bias_mu(6, 114))
+n.bias <- 1
+bayes.bias.1 <- cbind(bayes_bias_mu(n.bias, 110), bayes_bias_mu(n.bias, 112), bayes_bias_mu(n.bias, 113), 
+                      bayes_bias_mu(n.bias, 114), bayes_bias_mu(n.bias, 133), bayes_bias_mu(n.bias, 224))
+n.bias <- 10
+bayes.bias.10 <- cbind(bayes_bias_mu(n.bias, 110), bayes_bias_mu(n.bias, 112), bayes_bias_mu(n.bias, 113), 
+                      bayes_bias_mu(n.bias, 114), bayes_bias_mu(n.bias, 133), bayes_bias_mu(n.bias, 224))
+n.bias <- 1000
+bayes.bias.1000 <- cbind(bayes_bias_mu(n.bias, 110), bayes_bias_mu(n.bias, 112), bayes_bias_mu(n.bias, 113), 
+                      bayes_bias_mu(n.bias, 114), bayes_bias_mu(n.bias, 133), bayes_bias_mu(n.bias, 224))
+```
+This means that the bias is larger the further $\bar y$ is from $\mu^*$ and that bias often increases as sample size increases, although this doesn't hold when $\bar y = \mu^*$. Finally, it's worth noting that bias cannot equal zero when $\bar y = \mu^*$, but that only happens only when $\bar y - 112 = 12 / n$.  
+
+*Variance*  
+The variance, is given by:  
+$$Var[\hat{\mu}|\mu^*] = E_{\pmb{y}}[(\hat{\mu} - m )^2|\mu^*] = \frac{1}{1/s_{\mu 0}^2 + n/\sigma^2} = \frac{1}{1/225 + n/225} = \frac{225}{n+1}$$
+```{r}
+bayes_variance <- function(n){225/(n+1)}
+(bayes_variance(10))
+(bayes_variance(1000))
+(bayes_variance(1))
+(bayes.variance <- cbind(bayes_variance(1), bayes_variance(10), bayes_variance(1000)))
+```
+This means that as $n$ increases, the variance decreases, regardless of $\bar y$ or the mean (expected or real).  
+
+*MSE*  
+Finally, for the MSE we use:  
+$$MSE[\hat{\mu}|\mu^*] = Var[\hat{\mu}|\mu^*] + Bias(\hat{\mu})^2 = \frac{225}{n+1} + (n (\bar y - 112) - 12)^2$$
+$$MSE[\hat{\mu}|\mu^*] = \frac{225}{n+1} + (\bar y n - 112n -12)^2$$
+
+```{r}
+bayes_mse <- function(n = 10, ybar = 113){(225/(n+1)) + (((n*(ybar-112))-12)/(n+1))^2}
+(bayes_mse(10, 113))
+(bayes_variance(10) + (bayes_bias_mu(10, 113))^2)
+(bayes_mse(1000, 113))
+(bayes_variance(1000) + (bayes_bias_mu(1000, 113))^2)
+(bayes_mse(1, 113))
+(bayes_variance(1) + (bayes_bias_mu(1, 113))^2)
+(bayes_mse(10, 133))
+(bayes_variance(10) + (bayes_bias_mu(10, 133))^2)
+(bayes_mse(1000, 133))
+(bayes_variance(1000) + (bayes_bias_mu(1000, 133))^2)
+(bayes_mse(1, 133))
+(bayes_variance(1) + (bayes_bias_mu(1, 133))^2)
+(bayes_mse(10, 112))
+(bayes_variance(10) + (bayes_bias_mu(10, 112))^2)
+(bayes_mse(1000, 112))
+(bayes_variance(1000) + (bayes_bias_mu(1000, 112))^2)
+(bayes_mse(1, 112))
+(bayes_variance(1) + (bayes_bias_mu(1, 112))^2)
+(bayes_mse(10, 224))
+(bayes_mse(1000, 224))
+(bayes_mse(1, 224))
+(bayes_mse(12, 113))
+(bayes_mse(6, 114))
+n.mse <- 1
+bayes.mse.1 <- cbind(bayes_mse(n.mse, 110), bayes_mse(n.mse, 112), bayes_mse(n.mse, 113), 
+                      bayes_mse(n.mse, 114), bayes_mse(n.mse, 133), bayes_mse(n.mse, 224))
+n.mse <- 10
+bayes.mse.10 <- cbind(bayes_mse(n.mse, 110), bayes_mse(n.mse, 112), bayes_mse(n.mse, 113), 
+                      bayes_mse(n.mse, 114), bayes_mse(n.mse, 133), bayes_mse(n.mse, 224))
+n.mse <- 1000
+bayes.mse.1000 <- cbind(bayes_mse(n.mse, 110), bayes_mse(n.mse, 112), bayes_mse(n.mse, 113), 
+                      bayes_mse(n.mse, 114), bayes_mse(n.mse, 133), bayes_mse(n.mse, 224))
+```
+It is noteworthy that when $\bar y$ is close to $\mu^*$, increasing $n$ decreases the MSE, but when $\bar y$ is far from $\mu^*$ then increasing $n$ increases the MSE.  
+
+Now, for the ML estimators:  
+**Maximum Likelihood Estimator**  
+*Bias*  
+$$E_{\pmb{y}}[\hat{\mu}|\mu^*] = \bar y$$
+Since $\mu^*$ is a fixed value and not a random variable, the bias becomes:  
+
+$$Bias(\hat{\mu})^ = E_{\pmb{y}}[\hat{\mu}|\mu^*] - \mu^* = \bar y - 112$$
+```{r}
+mle_bias_mu <- function(ybar){(ybar-112)}
+(mle_bias_mu(113))
+(mle_bias_mu(133))
+(mle_bias_mu(112))
+(mle_bias_mu(224))
+mle.bias <- cbind(mle_bias_mu(110), mle_bias_mu(112), mle_bias_mu(113), 
+                      mle_bias_mu(114), mle_bias_mu(133), mle_bias_mu(224))
+```
+This means that bias in MLE is independent of $n$ and only depends on $\bar y$.  
+
+Now, to compare the bias for the Bayes and MLE estimators, I will take the absolute value of the bias, comparing different sample sizes $n = 1, 10, 1,000$ for the Bayes estimator and subtract the MLE estimator bias from it, to see which is larger.  
+```{r}
+(abs(bayes.bias.1) - abs(mle.bias))
+(abs(bayes.bias.10) - abs(mle.bias))
+(abs(bayes.bias.1000) - abs(mle.bias))
+```
+When $\bar y$ is close to $\mu^*$, the bias for the Bayes Estimator is larger, but as it gets further from $\mu^*$, then the ML Estimator has a bigger bias. Also, as $n$ increases, the bias decreases importantly.  
+
+*Variance*  
+The variance, is given by:  
+$$Var[\hat{\mu}|\mu^*] = \sigma^2/n = 225/n$$
+```{r}
+mle_variance <- function(n){225/(n)}
+(mle_variance(10))
+(mle_variance(1000))
+(mle_variance(1))
+(mle.variance <- cbind(mle_variance(1), mle_variance(10), mle_variance(1000)))
+```
+This means that as $n$ increases, the variance decreases, regardless of $\bar y$ or the mean (expected or real).  
+
+Now, to compare the variance for the Bayes and MLE estimators, I will subtract the latter from the former, comparing different sample sizes $n = 1, 10, 1,000$, to see which is larger.  
+```{r}
+(bayes.variance - mle.variance)
+```
+In all instances the Bayesian estimator has smaller variance, although as $n$ increases, this difference becomes inconsequential.  
+
+
+*MSE*  
+Finally, for the MSE we use:  
+$$MSE[\hat{\mu}|\mu^*] = Var[\hat{\mu}|\mu^*] + Bias(\hat{\mu})^2 = \frac{225}{n} + \bar y^2$$
+```{r}
+mle_mse <- function(n = 10, ybar = 113){(225/(n)) + (ybar-112)^2}
+(mle_mse(10, 113))
+(mle_variance(10) + (mle_bias_mu(113))^2)
+(mle_mse(1000, 113))
+(mle_variance(1000) + (mle_bias_mu(113))^2)
+(mle_mse(1, 113))
+(mle_variance(1) + (mle_bias_mu(113))^2)
+(mle_mse(10, 133))
+(mle_variance(10) + (mle_bias_mu(133))^2)
+(mle_mse(1000, 133))
+(mle_variance(1000) + (mle_bias_mu(133))^2)
+(mle_mse(1, 133))
+(mle_variance(1) + (mle_bias_mu(133))^2)
+(mle_mse(10, 112))
+(mle_variance(10) + (mle_bias_mu(112))^2)
+(mle_mse(1000, 112))
+(mle_variance(1000) + (mle_bias_mu(112))^2)
+(mle_mse(1, 112))
+(mle_variance(1) + (mle_bias_mu(112))^2)
+(mle_mse(10, 224))
+(mle_mse(1000, 224))
+(mle_mse(1, 224))
+(mle_mse(12, 113))
+(mle_mse(6, 114))
+n.mse <- 1
+mle.mse.1 <- cbind(mle_mse(n.mse, 110), mle_mse(n.mse, 112), mle_mse(n.mse, 113), 
+                      mle_mse(n.mse, 114), mle_mse(n.mse, 133), mle_mse(n.mse, 224))
+n.mse <- 10
+mle.mse.10 <- cbind(mle_mse(n.mse, 110), mle_mse(n.mse, 112), mle_mse(n.mse, 113), 
+                      mle_mse(n.mse, 114), mle_mse(n.mse, 133), mle_mse(n.mse, 224))
+n.mse <- 1000
+mle.mse.1000 <- cbind(mle_mse(n.mse, 110), mle_mse(n.mse, 112), mle_mse(n.mse, 113), 
+                      mle_mse(n.mse, 114), mle_mse(n.mse, 133), mle_mse(n.mse, 224))
+```
+In the case of the ML, the MSE always decreases as $n$ increases, and always increases the further $\bar y$ is from $\mu^*$.  
+
+Now, to compare the MSE for the Bayes and MLE estimators, I will compare different sample sizes $n = 1, 10, 1,000$ for both estimators and subtract the MLE estimator from the Bayes estimator, to see which is larger.  
+```{r}
+(bayes.mse.1 - mle.mse.1)
+(bayes.mse.10 - mle.mse.10)
+(bayes.mse.1000 - mle.mse.1000)
+```
+In most instances the Bayesian estimator has a smaller MSE than the ML estimator, especially as $\bar y$ gets further from $\mu^*$. Also, as $n$ increases, the bias decreases importantly.  
+
+
 Optional: Consider  
 (i) plotting the sampling distributions for both the Bayes estimator as well as the MLE.  
+
+```{r}
+plot_densities <- function(n = 10, ybar = 113, xlow = 0, xhigh = 200){
+  bayes.mu <- bayes_exp_mu(n, ybar)
+  bayes.var <- bayes_variance(n)
+  sd.mle <- mle_variance(n)
+  bayes_dens <- function(x) dnorm(x, mean = bayes.mu , sd = bayes.var)
+  mle_dens <- function(x) dnorm(x, mean = ybar, sd = sd.mle)
+  
+  samp.dist <- ggplot(NULL, aes(c(xlow, xhigh))) + 
+    geom_line(stat = "function", fun = bayes_dens, color = "red", linetype = "dotdash") +
+    geom_line(stat = "function", fun = mle_dens, linetype = "longdash", color = "blue") + 
+    theme_minimal() +
+    ylab("Density") +
+    xlab(expression(mu)) + 
+    theme(
+      legend.position = "top",
+      legend.title = element_blank(),
+      text = element_text(size = 20)
+    )
+  samp.dist + geom_vline(xintercept = 112, linetype="dotted", color = "green", size=1.5)
+}
+plot_densities()
+plot_densities(1000, 113, 111, 115)
+plot_densities(1, 113, -300,500)
+plot_densities(10, 133)
+plot_densities(1000, 133, 110, 135)
+plot_densities(1, 133, -300,500)
+plot_densities(10, 112)
+plot_densities(1000, 112, 111, 113)
+plot_densities(1, 112, -300,500)
+plot_densities(10, 224, 100, 300)
+plot_densities(1000, 224, 110, 235)
+plot_densities(1, 224, -300,500)
+```
+
+When $n$ is very large (e.g., $n > 1,000$), the Bayesian and ML Estimators have approximately the same distribution. Nonetheless, when $n$ is smaller, the Bayesian Estimator has a higher density near the true mean, even when the bias is larger (e.g., $\hat \mu = 224$). When $n$ is especially small, the variance in the Bayesian Estimator is smaller.  
+
 (ii) obtaining the Bayes and ML MSEs for sample sizes $n$ = 10 to 1,000 and plotting the ratio (Bayes MSE)/(ML MSE) against sample size, to then interpret your findings. 
+```{r}
+n <- seq(10, 1000)
+ybar <- 113
+bayes.mse <- c()
+for(a in 10:1000){
+  temp <- bayes_mse(a, ybar)
+  bayes.mse <- append(bayes.mse, temp)
+}
+mle.mse <- c()
+for(a in 10:1000){
+  temp <- mle_mse(a, ybar)
+  mle.mse <- append(mle.mse, temp)
+}
+bayesmse.mlmse.113 <- bayes.mse / mle.mse
+ratio.plot <- as_tibble(cbind(n, bayesmse.mlmse.113))
+plot(n, bayesmse.mlmse.113)
+ratio.plot %>% 
+  ggplot(aes(x=n, y=bayesmse.mlmse.113)) + 
+  geom_line(size = .5, color = "blue") +
+  theme_minimal() +
+  ylab("Bayes MSE / ML MSE") +
+  ylim(0.85, 1) + 
+  xlab("Sample Size")
+
+n <- seq(1, 1000)
+ybar <- 110
+bayes.mse <- c()
+for(a in 1:1000){
+  temp <- bayes_mse(a, ybar)
+  bayes.mse <- append(bayes.mse, temp)
+}
+mle.mse <- c()
+for(a in 1:1000){
+  temp <- mle_mse(a, ybar)
+  mle.mse <- append(mle.mse, temp)
+  }
+bayesmse.mlmse.110 <- bayes.mse / mle.mse
+ratio.plot <- as_tibble(cbind(n, bayesmse.mlmse.110))
+plot(n, bayesmse.mlmse.110)
+ratio.plot %>% 
+  ggplot(aes(x=n, y=bayesmse.mlmse.110)) + 
+  geom_line(size = .5, color = "blue") +
+  theme_minimal() +
+  ylab("Bayes MSE / ML MSE") +
+  ylim(0.7, 1.15) + 
+  xlab("Sample Size")
+```
+With the values given in the assignment, where $\bar y = 113$, the MSE for the Bayesian estimator is always smaller than the MSE for the ML estimator. Nonetheless, under a different circumstance, when $\bar y = 110$, the MSE for the ML estimator is smaller than the Bayesian estimator, except when $n$ is very small. Nonetheless, in all instances, as $n$ increases, the Bayesian and ML estimators end up having roughly the same MSE.  
 
 # Part 2 - based on module 5 
 
