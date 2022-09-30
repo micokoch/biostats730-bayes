@@ -24,7 +24,7 @@ library(brms)
 We continue with IQ data, as introduced in HW2. For this HW, data set iq_scores.csv contains 10 iq-scores, sampled from a town in let's say, your favorite country. 
 
 ```{r}
-iqs <- read_csv("iq_scores.csv") %>% 
+iqs <- read_csv("iq_scores.csv", show_col_types = FALSE) %>% 
   mutate(y = iq_score)
 ```
 
