@@ -1,0 +1,185 @@
+---
+title: 'Module 10: rstan'
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+
+To learn about rstan, consider this vignette: 
+
+https://cran.r-project.org/web/packages/rstan/vignettes/rstan.html
+
+See here for prior choice recommendation:
+
+https://github.com/stan-dev/stan/wiki/Prior-Choice-Recommendations
+
+In this notebook, we start simpler, estimating just a mean and variance, followed by the fitting of a hierarchical model. 
+We compare the model used to that used (implicitly) in brm.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(brms)
+
+library(rstan)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+
+library(tidybayes) # added mostly as a reference for future use, for easier manipulation of posterior samples. 
+# used here for function `point_interval'
+```
+
+
+# Radon data
+Read in the radon data and process (copied from earlier module)
+```{r}
+# house level data
+d <- read.table(url("http://www.stat.columbia.edu/~gelman/arm/examples/radon/srrs2.dat"), 
+                header=T, sep=",")
+
+# deal with zeros, select what we want, make a fips (county) variable to match on 
+d <- d %>% 
+  mutate(activity = ifelse(activity==0, 0.1, activity)) %>% 
+  mutate(fips = stfips * 1000 + cntyfips) %>%   
+  dplyr::select(fips, state, county, floor, activity)
+
+# county level data
+cty <- read.table(url("http://www.stat.columbia.edu/~gelman/arm/examples/radon/cty.dat"), 
+                  header = T, sep = ",")
+cty <- 
+  cty %>% 
+  mutate(fips = 1000 * stfips + ctfips) %>% 
+  dplyr::select(fips, Uppm) %>%
+  rename(ura_county = (Uppm))
+
+dmn <- d %>% 
+  filter(state=="MN") %>% # Minnesota data only
+  dplyr::select(fips, county, floor, activity) %>% 
+  left_join(cty) 
+
+dat <- 
+  dmn%>%
+  mutate(y = log(activity), log_ur = log(ura_county))
+head(dat)
+```
+
+
+
+# Using rstan to estimate mean and variance 
+
+Start simple, let $y_i =$ log(radon), and assume 
+$$y_i|\mu, \sigma \sim N(\mu, \sigma^2),$$
+to estimate $\mu$ and $\sigma$.
+
+We need to define data inputs and a stan model file.
+
+For the stan model file template, go to "File", "new file", "stan file".
+Note that the default is to estimate $\mu$ and $\sigma$ as in our seting!
+The default template has flat priors, we can add priors.
+Save it, I called it "module10_mean_addpriors.stan".
+
+Create data inputs: 
+```{r}
+stan_dat <- list(y = dat$y, N = length(dat$y))
+```
+
+
+```{r, results = "hide"}
+fit <- stan(file = 'module10_stan_mean_addpriors.stan', data = stan_dat)
+```
+
+Showing some default oupputs, see also the Rstan vignette
+
+```{r}
+print(fit)
+```
+
+
+```{r}
+plot(fit)
+```
+
+```{r}
+pairs(fit, pars = c("mu", "sigma"))
+```
+
+```{r}
+pairs(fit, pars = c("mu", "sigma"))
+```
+
+
+```{r}
+traceplot(fit, pars = c("sigma"))
+```
+
+
+
+## Compare to brm-based model
+
+```{r, results = "hide"}
+fit_brm <- brm(y ~ 1, data = dat,
+        chains = 4, iter = 1000, warmup = 500, cores = getOption("mc.cores", 4))
+```
+
+
+```{r}
+summary(fit_brm)
+```
+
+```{r}
+print(fit)
+```
+
+```{r}
+stan_data_from_brm <- standata(fit_brm)
+names(stan_data_from_brm)
+# N and y (called Y here) are same as in stan_dat
+stan_dat$N
+stan_data_from_brm$N
+
+```
+
+```{r}
+summary(stan_data_from_brm$Y)
+summary(dat$y)
+```
+
+```{r}
+stancode(fit_brm)
+```
+
+
+See slides re what's going on in this model!
+
+For just the priors
+```{r}
+get_prior(y~1, data = dat)
+```
+
+# Fit a multilevel regression model 
+
+Consider the following model: $y_i|\mu_i, \sigma \sim N(\mu_i, \sigma^2),$ where
+$$\mu_i = \mu_{\alpha} + \eta_{j[i]} + \beta x_i,$$
+where $j[i]$ refers to county and $x_i$ to floor indicator.
+
+The stan model for this is given in module10_hier_regression.stan. 
+
+```{r}
+dat <- dat %>%
+  mutate(county_id = as.numeric(as_factor(county)))
+stan_dat2 <- list(y = dat$y, N = length(dat$y), x = dat$floor, county_id = dat$county_id, 
+                  J = max(dat$county_id))
+```
+
+
+```{r, results = "hide"}
+fit2 <- stan(file = 'module10_hier_regression.stan', data = stan_dat2)
+```
+
+```{r}
+print(fit)
+```
+
+
