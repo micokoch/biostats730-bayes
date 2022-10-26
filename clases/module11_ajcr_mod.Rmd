@@ -1,0 +1,236 @@
+---
+title: 'Module 11: Model checking'
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(brms)
+library(bayesplot) 
+# when using bayesplot, I got some errors that resolved when adding theme_classic. 
+```
+
+This Rmd contains model checking for part 1, doing in-sample checks. 
+
+
+# Radon data
+Read in the radon data and process (copied from earlier module)
+```{r}
+# house level data
+d <- read.table(url("http://www.stat.columbia.edu/~gelman/arm/examples/radon/srrs2.dat"), 
+                header=T, sep=",")
+
+# deal with zeros, select what we want, make a fips (county) variable to match on 
+d <- d %>% 
+  mutate(activity = ifelse(activity==0, 0.1, activity)) %>% 
+  mutate(fips = stfips * 1000 + cntyfips) %>%   
+  dplyr::select(fips, state, county, floor, activity)
+
+# county level data
+cty <- read.table(url("http://www.stat.columbia.edu/~gelman/arm/examples/radon/cty.dat"), 
+                  header = T, sep = ",")
+cty <- 
+  cty %>% 
+  mutate(fips = 1000 * stfips + ctfips) %>% 
+  dplyr::select(fips, Uppm) %>%
+  rename(ura_county = (Uppm))
+
+dmn <- d %>% 
+  filter(state=="MN") %>% # Minnesota data only
+  dplyr::select(fips, county, floor, activity) %>% 
+  left_join(cty) 
+
+dat <- 
+  dmn%>%
+  mutate(y = log(activity), log_ur = log(ura_county))
+head(dat)
+```
+
+# Model fitting
+
+To illustrate the use of model checks, we fit the following models:
+
+```{r}
+fit <- brm(y ~ 1, family = gaussian(), 
+            data = dat, #sample_prior = T, 
+              seed = 123, # need to add seed here to make this reproducible 
+            chains = 4,
+            iter = 1000, thin = 1,
+            cores = getOption("mc.cores", 4),
+            file = "output/mod11_fit")
+```
+
+Model with county intercepts only
+```{r}
+fit_county <- brm(y ~ (1|county), family = gaussian(), 
+            data = dat, #sample_prior = T, 
+              seed = 123, # need to add seed here to make this reproducible 
+            chains = 4,
+            iter = 1000, thin = 1,
+            cores = getOption("mc.cores", 4),
+            file = "output/mod11_fit_county")
+
+```
+
+Everything 
+```{r, results = "hide"}
+fit_all <- brm(y ~ (1 + floor|county) + log_ur*floor, family = gaussian(), 
+            data = dat, #sample_prior = T, 
+              seed = 123, # need to add seed here to make this reproducible 
+            chains = 4,
+            iter = 2000, thin = 1,
+            cores = getOption("mc.cores", 4),
+             file = "output/mod11_fit_all")
+```
+
+
+# In-sample checks using replicated data sets
+
+## Obtain replicated data sets
+
+Note that a lot of outputs can be generated directly with the brm-fit-object as well, as illustrated below. However, when fitting your own stan model, your starting point is working with repeated data sets. So I'm adding that approach here as well. (It may also help, even if you use brm, to be able to produce your own results). 
+
+```{r}
+ynew_si <- posterior_predict(fit) # adding si to indicate the dimension used
+dim(ynew_si)
+```
+
+```{r}
+ynew_all_si <- posterior_predict(fit_all) 
+
+```
+
+```{r}
+ynew_county_si <- posterior_predict(fit_county) 
+
+```
+
+
+## Residuals 
+
+Obtain point  estimates from the replicated data
+```{r}
+ytildehat_i <- apply(ynew_si, 2, mean)
+res <- dat$y - ytildehat_i
+```
+
+and make some old-school plots (that I am sure you can improve upon :))
+```{r}
+plot(res ~ dat$log_ur)
+abline(h=0)
+```
+
+### brm-fit specific function 
+
+The residuals function, when applied to a brm-fit-object, returns the average residuals, as well as their SD and percentiles.  
+
+```{r}
+#?residuals.brmsfit # if you want to see the help function
+res_brm <- residuals(fit)
+head(res_brm)
+```
+
+Then you can work with these residuals, e.g.
+```{r}
+plot(res_brm[,"Estimate"] ~ dat$log_ur)
+```
+
+Last but not least, an automated way to do so, using functionality from the Bayesplot package: 
+```{r}
+pp_check(fit_all, type = "error_scatter_avg_vs_x",
+         x = "log_ur") + 
+        theme_classic()
+```
+
+
+## Graphical checks
+
+Density of observed data, and densities based on 50 replicated data sets
+```{r}
+set.seed(123)
+select_samp <- sample(1:dim(ynew_si)[1], 50)
+ppc_dens_overlay(y = dat$y, yrep = ynew_si[select_samp, ]) +
+  theme_classic()
+```
+
+Now let's consider a test quantity, here a group-specific median, plotted for 3 counties.
+Results for the model w/o county intercepts show that observed median is extreme for one county (Anoka). 
+
+```{r}
+# select data for 3 counties
+select_i <- which(is.element(dat$county, unique(dat$county)[seq(1,3)]))
+color_scheme_set("blue")
+ppc_stat_grouped(dat$y[select_i], yrep = ynew_si[, select_i],
+                 group = dat$county[select_i], 
+                 stat = "median") + theme_classic()
+```
+When adding the county level information, the observed median is not longer extreme:
+```{r}
+ppc_stat_grouped(dat$y[select_i], yrep = ynew_all_si[, select_i],
+                 group = dat$county[select_i], 
+                 stat = "median") + theme_classic()
+
+```
+
+Now let's check how extreme the observed maximum and 95th percentile of the data are, compared to these outcomes in replicated data sets.
+
+```{r}
+max_s <- apply(ynew_all_si, 1, max) # maximum values in each of the replicated data sets
+hist(max_s)
+abline(v = max(dat$y))
+mean(max_s >= max(dat$y))
+```
+
+Alvaro will try out a histogram for the min
+```{r}
+min_s <- apply(ynew_all_si, 1, min) # maximum values in each of the replicated data sets
+hist(min_s)
+abline(v = min(dat$y))
+mean(min_s >= min(dat$y))
+```
+
+
+
+Using brm-fit-object, adding minimum as well:
+we see that the observed maximum is not extreme but the observed minimum may be. 
+```{r}
+pp_check(fit, type = "stat_2d", stat = c("max", "min")) +
+  theme_classic()
+```
+
+```{r}
+min_s <- apply(ynew_all_si, 1, min) # maximum values in each of the replicated data sets
+hist(min_s)
+abline(v = min(dat$y))
+mean(min_s >= min(dat$y))
+```
+# Illustrating generated quantities in rstan
+```{r}
+library(rstan)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+```
+
+
+```{r}
+dat <- dat %>%
+  mutate(county_id = as.numeric(as_factor(county)))
+stan_dat2 <- list(y = dat$y, N = length(dat$y), x = dat$floor, county_id = dat$county_id, 
+                  J = max(dat$county_id))
+```
+
+
+```{r, results = "hide"}
+fit2 <- stan(file = 'module11_hier_regression.stan', seed = 123, data = stan_dat2)
+```
+
+```{r}
+y_new_list <- extract(fit2, pars = "y_new")
+y_new2_si <- y_new_list$y_new
+dim(y_new2_si)
+```
+
+
