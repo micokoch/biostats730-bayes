@@ -65,3 +65,4 @@ formula = y ~ 1+z
 result = inla(formula, family = "gaussian", data = data)
 
 summary(result)
+
