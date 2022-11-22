@@ -2,7 +2,7 @@
 # Based on https://bookdown.org/roback/bookdown-BeyondMLR/ch-3level.html
 
 library(tidyverse)
-# library(lme4)
+library(lme4)
 # library(brms)
 
 
@@ -65,10 +65,10 @@ length(pop[pop>1000000])
 # There are 41 counties with a population over 1'000,000
 sum(pop)
 # total 346'748,781; real US population is 331.9 million
-hist(pop, breaks = 20)
-hist(pop[pop<5000], breaks = 20)
-hist(pop[pop<50000], breaks = 20)
-hist(pop[pop>500000], breaks = 20)
+# hist(pop, breaks = 20)
+# hist(pop[pop<5000], breaks = 20)
+# hist(pop[pop<50000], breaks = 20)
+# hist(pop[pop>500000], breaks = 20)
 # The distribution looks good
 
 
@@ -224,18 +224,121 @@ summary(lesbyst)
 
 
 
+# Finally, try to model relationship with a hierarchical and non-hierarchical model
+# Model only with sx and ppl, exclude other predictors but use states and regions for levels
+# gdppc_c was set to vary at the regional level
+# ineq varied by other variables, mainly at regional and to a lesser degree state level
+# hm was set to vary at the state level
+# ppl varied randomly across all counties
+# sx varied randomly by all counties
 
-# y_ijk = life expectancy of person k in county j, in state i
-# x_ijk = sex of person k in county j in state i
-# a_ij = mean life expectancy of all people in county j in state i
+# Based on: https://bookdown.org/roback/bookdown-BeyondMLR/ch-3level.html#initialmodels-3level
 
-# y_ijk = a_ij + d * x_ijk
+# y_ijk = life expectancy for people in county k, in state j, in region i
+# a_ij = mean life expectancy of all people in state j, in region i
+# x_ijk = proportion female in county k, in state j, in region i
+# p_ijk = population in county k, in state j, in region i
+# e_ijk = difference in life expectancy in a given county k from the mean life expectancy
+# in a given state j, in region i, where e_ijk ~ N(0,s^2)
+# s^2 = variance component (random effects model parameter) that describes county to
+# county variation within a state
+
+# a_i = mean life expectancy of all people in region i
+# q_ij = state level category: meant to capture hm, part of ineq
+# u_ij = difference in the mean life expectancy in a given state j from the mean
+# life expectancy in region i, where u_ij ~ N(0,s_u^2)
+# s_u^2 = variance component that describes state to state variation within a region
+
+# r_i = regional category: meant to capture gdppc_c and part of ineq
+# u_bar_i = difference in life expectancy in region i from overall mean across all counties, 
+# states, and regions, where u_bar_i ~ N(0,s_ubar^2)
+# s_ubar^2 = variance component that describes region to region variation
+
+# y_ijk = a_ij + d * x_ijk + f * p_ijk + e_ijk
+# a_ij = a_i + g * q_ij + u_ij
+# a_i = a_0 + h * r_i + u_bar_i
+
+# None of the error terms (e_ijk, u_ij, u_bar_i) are considered model parameters; they simply 
+# account for differences between the observed data and expected values under our model.
 
 
-# Proportion female
+# To start, select the variables I will use
+df.8 <- df.7 %>% select(lex, cty, st, re, ppl_10mill_c, sx_c)
+# Set county and state as factors
+df.8$cty <- as.factor(df.8$cty)
+df.8$st <- as.factor(df.8$st)
 
-colnames(df.3) <- c("county","state","region","GDP per capita (centered)","Medicaid expansion")
 
+# Split data into train and test fractions
+set.seed(1234)
+split1 <- sample(c(0, rep(0, 0.7 * nrow(df.8)), rep(1, 0.3 * nrow(df.8))))
+table(split1)
 
+train1 <- df.8[split1 == 0, ]
+head(train1)
 
+test1 <- df.8[split1 == 1, ]
+head(test1)
+
+# Now, to test the models
+# Model A: 1 level
+model.1l <- lm(lex ~ 1 + ppl_10mill_c + sx_c, data=train1)
+(model.1l.summ <- summary(model.1l))
+#calculate MSE
+mean(model.1l.summ$residuals^2)
+# 5.996114
+
+# Predict outcomes
+model.1l.predict <- predict.glm(model.1l, test1, type = "response")
+
+#create data frame with a column of actual values and a column of predicted values
+rmse.1l.test.predict <- data.frame(index = test1$cty, pred = model.1l.predict, actual = test1$lex)
+#view first six lines of data
+head(rmse.1l.test.predict)
+#calculate MSE
+mean((rmse.1l.test.predict$actual - rmse.1l.test.predict$pred)^2)
+# 6.299727
+
+# Model B: 3 levels
+model.3l <- lmer(lex ~ 1 + sx_c + ppl_10mill_c + (1|st) + (1|re), data=train1)
+(model.3l.summ <- summary(model.3l))
+#calculate MSE
+mean(model.3l.summ$residuals^2)
+# 0.9782599 - MUCH smaller MSE
+
+# Predict outcomes
+model.3l.predict <- predict(model.3l, test1, type = "response")
+
+#create data frame with a column of actual values and a column of predicted values
+rmse.3l.test.predict <- data.frame(index = test1$cty, pred = model.3l.predict, actual = test1$lex)
+#view first six lines of data
+head(rmse.3l.test.predict)
+#calculate MSE
+mean((rmse.3l.test.predict$actual - rmse.3l.test.predict$pred)^2)
+# 0.05916499 - MUCH smaller MSE
+
+# Model C: 1 level with all predictors
+model2.1l <- lm(lex ~ 1 + ppl_10mill_c + sx_c + st + re, data=train1)
+(model2.1l.summ <- summary(model2.1l))
+#calculate MSE
+mean(model2.1l.summ$residuals^2)
+# 0.06138665 - actually lower than multilevel model
+
+# Predict outcomes
+model2.1l.predict <- predict.glm(model2.1l, test1, type = "response")
+
+#create data frame with a column of actual values and a column of predicted values
+rmse2.1l.test.predict <- data.frame(index = test1$cty, pred = model2.1l.predict, actual = test1$lex)
+#view first six lines of data
+head(rmse2.1l.test.predict)
+#calculate MSE
+mean((rmse2.1l.test.predict$actual - rmse2.1l.test.predict$pred)^2)
+# 0.05918572 - ever so slightly bigger than multilevel model - less interpretable
+
+### Links to review (if desired)
+# 1. Household income inequality pdf (with county data):
+# https://www2.census.gov/library/publications/2012/acs/acsbr10-18.pdf
+# 2. Prediction and training using `caret`:
+# https://cran.r-project.org/web/packages/caret/vignettes/caret.html
+# https://topepo.github.io/caret/
 
