@@ -1,0 +1,413 @@
+---
+title: "Applied Bayesian modeling - HW5"
+header-includes:
+    - \usepackage{bm}
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+Score: Each question is worth 10 points. The maximum number of points in this HW is 40 points, with 10 points extra credit. For calculating a final HW grade, the points will be rescaled to a maximum score of (50)/40*100% = 125%. 
+
+In this homework, we will consider elements of a Bayesian workflow. The basis of this HW is the excellent blog post by Monica Alexander on this topic:  
+https://www.monicaalexander.com/posts/2020-28-02-bayes_viz/
+
+We use the same dataset, repeat some of steps, and add some additional ones. 
+
+You can choose whether you answer the questions using functionality from the brms or rstan package. You may find the code from Monica's blog post, example code below, and/or code from module 11 helpful. 
+In addition, added below is some example code using brm.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(bayesplot)
+library(loo)
+library(tidybayes)
+library(here)
+
+# consider using 
+library(brms)
+# or
+#library(rstan)
+#options(mc.cores = parallel::detectCores())
+#rstan_options(auto_write = TRUE)
+```
+
+# Data 
+
+The dataset is a 0.1% sample of all births in the US in 2017 from NBER, details on how this was constructed is here
+https://github.com/MJAlexander/states-mortality/blob/master/birthweight_bayes_viz/births_2017_prep.R
+For UMass students, this data set is uploaded in https://drive.google.com/drive/folders/1XX_wfHa89E-0quq3LTmxQ03idkpHTRwP.
+
+```{r}
+ds <- read_rds(here("../data","births_2017_sample.RDS"))
+head(ds)
+```
+
+Brief overview of variables:
+
+- `mager` mum's age
+- `mracehisp` mum's race/ethnicity see here for codes: https://data.nber.org/natality/2017/natl2017.pdf page 15
+- `meduc` mum's education see here for codes: https://data.nber.org/natality/2017/natl2017.pdf page 16
+- `bmi` mum's bmi 
+- `sex` baby's sex
+- `combgest` gestational age in weeks
+- `dbwt` birth weight in kg
+- `ilive` alive at time of report y/n/ unsure
+
+Code below is to rename some variables, remove any observations with missing gestational age or birth weight, restrict just to babies that were alive, and make a preterm variable based on gestational age being less than 32 weeks. 
+
+```{r}
+ds <- ds %>% 
+  rename(birthweight = dbwt, gest = combgest) %>% 
+  mutate(preterm = ifelse(gest<32, "Y", "N")) %>% 
+  filter(ilive=="Y",gest< 99, birthweight<9.999)
+```
+
+## Some EDA
+
+Some plots, taken from Monica's blog 
+```{r}
+ds %>% 
+  ggplot(aes(log(gest), log(birthweight))) + 
+  geom_point() + geom_smooth(method = "lm") + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw(base_size = 14) +
+  ggtitle("birthweight v gestational age")
+```
+
+
+```{r}
+ds %>% 
+  ggplot(aes(log(gest), log(birthweight), color = preterm)) + 
+  geom_point() + geom_smooth(method = "lm") + 
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw(base_size = 14) + 
+  ggtitle("birthweight v gestational age")
+```
+# Models
+We consider the following 2 models:
+
+Model 1 has log birth weight as a function of log gestational age
+
+$$
+y_i|\beta_0, \beta_1, \sigma \sim N(\beta_0 + \beta_1x_i, \sigma^2)
+$$
+
+Model 2 has an interaction term between gestation and prematurity
+
+$$
+y_i|\beta_0, \beta_1, \beta_2, \beta_3, \sigma \sim N(\beta_0 + \beta_1 x_i + \beta_2 z_i + \beta_3x_i z_i, \sigma^2)
+$$
+
+- $y_i$ is log-transformed weight in kg
+- $x_i$ is log-gestational age in weeks, CENTERED AND STANDARDIZED, i.e. $x_i$ equal log(gestational age), minus its mean and divided by its standard deviation
+- $z_i$ is preterm (0 or 1, if gestational age is less than 32 weeks)
+
+
+For model fitting, we introduce the variables on the log-scale, and center and standardize the covariate:
+```{r}
+
+ds$log_weight <- log(ds$birthweight)
+ds$log_gest <- (log(ds$gest)/sd(log(ds$gest)))
+ds$log_gest_c <- (log(ds$gest) - mean(log(ds$gest)))/sd(log(ds$gest))
+
+```
+
+
+# Prior predictive checks using brm
+
+Monica's blog includes code in R to carry out a prior predictive check. The code here outlines how to do this using brm. 
+
+
+## Setting priors in brm, and a note of caution regarding the intercept
+Firstly, to set our own priors, we need to specify priors for usage in the brm-fit. The argument "prior" can be used for that when calling the brm function. Let's start by checking the default priors in brm. For model 1, we have equation $$E(y_i|\beta_0, \beta_1) = \beta_0 + \beta_1 \cdot x_i,$$ 
+where $x_i$ refers to log-transformed gestational age, which is centered (we subtracted the mean) and standardized (we divided by its standard deviation). This shows the default priors for model 1 used in brm:
+```{r}
+get_prior(log_weight~log_gest_c, data = ds)
+```
+
+The overview states that for regression coefficients (class = b), flat priors are used. In our model, we have one coefficient given by log_gest_c. A student_t(3, 0, 2.5) prior is used for sigma with a lower bound (lb) of 0. 
+
+The prior used for the intercept needs some more explanation, to avoid confusion in more complicated models. The overview states that a student_t(3, 1.2, 2.5) is used for "Intercept", which I'll refer to as the brm-Intercept. Using the default formula as we did above, the brm-Intercept parameter refers to the intercept of a model with centered covariates, i.e. for a general formula y ~ x, the brm-Intercept refers to $\alpha$ in $E(y_i|\alpha, \beta_1) = \alpha + \beta_1 (x_i - \bar{x})$.  This is also clear when checking the stan-model as we did in module 10, see below as well:
+
+```{r, results = "hide"}
+mod_tmp <- brm(log_weight~ log_gest_c, data = ds,
+   chains = 2,
+    iter = 20, # silly short run, just to get the stan model 
+    cores = getOption("mc.cores", 2),
+     file = "output/hw5_fit_tmp",
+   file_refit = "on_change")
+```
+
+The stan model explain that b_Intercept is $\beta_0$, while Intercept refers to a temporary intercept for centered predictors. 
+```{r}
+stancode(mod_tmp)
+```
+
+Note that the reason for brm to use this parametrization is computational efficiency, it still fits the same model and produces an estimate of the original intercept $\beta_0$ (b_Intercept) in the summary output.  Also note that in our model, because our covariate is centered, we DO get that $\alpha = \beta_0$. However, if $x$ is NOT centered (or if you add additional covariates that are not centered like in model 2), then brm-Intercept $\alpha$ is not equal to the intercept $\beta_0$ from a model with uncentered covariates. 
+
+The good news: If you would like to specify specific priors on $\beta_0$ (as opposed to $\alpha$), and work with samples from the prior and posterior on $\beta_0$, for a general model with $E(y_i|\bm{\beta}) = \beta_0 + \sum_{k=1}^K \beta_k x_{i,k}$, you can still use brm, you just need to change the formula that you use. 
+To be able to specify a prior on the intercept $\beta_0$, we can use the formula y ~ 0 + Intercept + covariates, e.g. for our model 1, we can use:
+
+
+```{r}
+get_prior(log_weight ~ 0 + Intercept + log_gest_c, data = ds)
+```
+
+When using this formula, the parameter Intercept now does refer to $\beta_0$, regardless of whether or not the covariates were centered. What happens internally is that we tell brm to NOT use an intercept term but instead, to use a covariate with 1s, with its coefficient labeled "Intercept". Hence "Intercept" is considered a regression coefficient. 
+To show this in the stan model as well:
+```{r, results = "hide"}
+mod_tmp2 <- brm(log_weight~ 0 + Intercept + log_gest_c, data = ds,
+   chains = 2,
+    iter = 20, # silly short run, just to get the stan model 
+    cores = getOption("mc.cores", 2),
+     file = "output/hw5_fit_tmp2",
+   file_refit = "on_change")
+```
+
+The stan model shows that we only have regression coefficients:
+```{r}
+stancode(mod_tmp2)
+```
+
+And the vector "Intercept" that went into the design matrix X has just 1s:
+```{r}
+mod_tmp2$data$Intercept[1:5] # showing first 5 entries
+```
+
+
+With that explanation out of the way, how do we set prior for brm-fits? We use the function set_prior for that, see ?set_prior for further information. In summary, the arguments of set_prior are the name of the parameter and the densities that you'd like to use. The exact specification follows the information printed by get_prior. 
+Here is an example, for the model with formula y ~ 0 + Intercept + covariates, that includes a prior for Intercept $\beta_0$:
+```{r}
+prior1 <- c(set_prior("normal(0,100)", class = "b", coef = "Intercept"), 
+            # for formula where the Intercept is considered a regression coefficient 
+            set_prior("normal(0,100)", class = "b"), # for any other regression coefficients
+            set_prior("student_t(3,0, 2.5)", lb = 0, class = "sigma")) # SD, note the lower bound at 0
+prior1 
+```
+
+Here is a fit using these priors:
+```{r, results = "hide"}
+mod1_prior1 <- brm(log_weight~ 0 + Intercept + log_gest_c, data = ds,
+   seed = 1236, 
+   prior = prior1,
+   chains = 4,
+    iter = 2000, thin = 1,
+    cores = getOption("mc.cores", 4),
+     file = "output/hw5_fit1_prior1",
+   file_refit = "on_change")
+
+```
+
+```{r}
+summary(mod1_prior1)
+```
+
+See stan model
+
+```{r}
+stancode(mod1_prior1)
+```
+
+
+
+
+## At last: Prior predictive checks using brm
+
+We can generate data sets based on these priors using the sample_prior argument, as follows:
+```{r, results = "hide"}
+mod1_priorpredict1 <- brm(log_weight ~ 0 + Intercept + log_gest_c, data = ds,
+   seed = 1236, 
+   prior = prior1,
+   sample_prior = "only", # we are drawing from the prior!
+   chains = 4,
+    iter = 2000, thin = 1,
+    cores = getOption("mc.cores", 4),
+     file = "output/hw5_fit1_priorpredict1",
+   file_refit = "on_change")
+
+```
+
+Note that if you look at the summary now, you won't get a model fit (given that data are not used), instead, it will show a summary of the prior distributions:
+```{r}
+summary(mod1_priorpredict1)
+```
+
+As before, we can generate data sets using the posterior_predict function
+
+```{r}
+ynew_si <- posterior_predict(mod1_priorpredict1) 
+dim(ynew_si)
+```
+
+We have generated 4000 data sets for log-transformed birth weights.  Here I am just plotting the first 10 against gestational age:
+```{r}
+bw_si <- as_tibble((t(ynew_si[1:10,])),.name_repair = "unique")
+bw_si %>% mutate(gest = ds$gest, observed_data = log(ds$birthweight))%>%
+  pivot_longer(-c(gest, observed_data)) %>% 
+  ggplot(aes(x = log(gest),y = value)) + 
+  geom_point() +
+  geom_point(aes(y = observed_data), color = "red") +
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw(base_size = 14) + 
+  ggtitle("log birthweight v gestational age")
+
+
+```
+Same thing for weakly informative priors
+
+```{r}
+prior2 <- c(set_prior("normal(0,1)", class = "b", coef = "Intercept"), 
+            set_prior("normal(0,1)", class = "b"), 
+            set_prior("student_t(3,0, 1)", lb = 0, class = "sigma")) 
+prior2
+```
+
+
+```{r, results = "hide"}
+mod1_priorpredict2 <- brm(log_weight~ 0 + Intercept + log_gest_c, data = ds,
+   seed = 1236, 
+   prior = prior2,
+   sample_prior = "only", # we are drawing from the prior!
+   chains = 4,
+    iter = 2000, thin = 1,
+    cores = getOption("mc.cores", 4),
+     file = "output/hw5_fit1_priorpredict2",
+   file_refit = "on_change")
+
+```
+
+
+```{r}
+ynew2_si <- posterior_predict(mod1_priorpredict2) 
+bw2_si <- as_tibble((t(ynew2_si[1:10,])),.name_repair = "unique")
+bw2_si %>% mutate(gest = ds$gest, observed_data = log(ds$birthweight))%>%
+  pivot_longer(-c(gest, observed_data)) %>% 
+  ggplot(aes(x = log(gest),y = value)) + 
+  geom_point() +
+  geom_point(aes(y = observed_data), color = "red") +
+  scale_color_brewer(palette = "Set1") + 
+  theme_bw(base_size = 14) + 
+  ggtitle("log birthweight v gestational age")
+
+
+```
+
+
+If we go ahead with prior set 2 and fit the model, we can make plots to compare prior and posterior densities for the model parameters for that fit. Brm has the option to also save samples from the priors, that can be used for those plots:
+
+```{r, results = "hide"}
+mod1_prior2 <- brm(log_weight ~ 0 + Intercept + log_gest_c, data = ds,
+   seed = 1236, 
+   prior = prior2,
+   sample_prior = "yes", # also sample from the priors 
+   chains = 4,
+    iter = 2000, thin = 1,
+    cores = getOption("mc.cores", 4),
+     file = "output/hw5_fit1_prior2",
+   file_refit = "on_change")
+
+```
+
+
+Compare priors and posteriors, note that this function works to get the plots without having to extract the samples:
+```{r}
+plot(hypothesis(mod1_prior2, "log_gest_c > 0"))
+plot(hypothesis(mod1_prior2, "Intercept > 0"))
+```
+To work with the samples yourself, you can pull out the samples using these functions: 
+
+```{r}
+samps <- as_draws_matrix(mod1_prior2)
+samps
+```
+
+
+Now plot
+```{r}
+as_tibble(samps) %>%
+  ggplot() +
+  geom_density(aes(x = b_log_gest_c), color = "red") +
+  geom_density(aes(x = prior_b_log_gest_c)) 
+```
+```{r}
+as_tibble(samps) %>%
+  ggplot() +
+  geom_density(aes(x = b_Intercept), color = "red") +
+  geom_density(aes(x = prior_b_Intercept)) 
+```
+
+
+```{r}
+as_tibble(samps) %>%
+  ggplot() +
+  geom_density(aes(x = sigma), color = "red") +
+  geom_density(aes(x = prior_sigma)) 
+```
+
+
+# Question 1: prior predictive check for model 2
+
+Consider model 2 as introduced above. Simulate data from the model using two sets of prior distributions, using prior set 1 with
+$\beta_k \sim N(0, 100)$, $\sigma \sim  t^+_3(2.5)$ (student-t with 3 degrees of freedom and scale parameter 2.5, truncated to positive outcomes); and prior set 2 with $\beta_k \sim N(0, 1)$, $\sigma \sim  t^+_3(1)$.
+
+Produce outputs to illustrate how the prior predictive distributions of the data compare to the observed data and/or to assess whether the priors are reasonable in sets 1 and 2. 
+
+
+
+
+
+# Question 2: prior-post comparison
+
+Fit model 2 with prior set 2. Produce plots that compare the priors and posteriors. Are the priors vague relative to the posteriors?
+
+
+
+
+# Question 3: Posterior predictive checks 
+
+We continue with models 1 and 2 with prior set 2. Consider three outcomes of interest:
+- test quantity 1 = median birth weight 
+- test quantity 2 = proportion of births under 2.5kg
+- test quantity 3 = proportion of births under 2.5kg for premature births 
+
+Introduce notation for each test statistic, i.e. write each test statistic as $T(\bm{y})$.
+
+For each combination of test statistic and model, plot the test statistics for replicated data sets together with the observed value and calculate the posterior predictive p-values.
+
+
+# Question 4: leave-one-out cross-validation
+
+Use the loo-package to carry out approximate leave-one-out cross-validation for the two models, both with prior set 2. 
+
+Specific questions:  
+
+- Obtain the Pareto k estimates and plot these against observation index. Explain if there are any instances of influential points suggested by the values.  
+
+- Obtain the loo-PIT plot for model 2, using ppc_loo_pit_overlay (see help file or code in module 11). 
+Explain what the curves refer to and briefly, what the plot tells you about the fit. 
+
+- Obtain the pointwise ELPDs for models 1 and 2. Plot the pointwise differences in ELPDs (i.e. $ELPD_i$ from model 2 - $ELPD_i$ from model 1) against gestational age. What do you conclude? 
+
+Note that for a given model, ELPDs can be obtained as follows (example code):
+```{r, eval = FALSE}
+loo_res2 <- loo(mod2_prior2, save_psis = TRUE)
+loo_res2$pointwise[, "elpd_loo"] 
+```
+the result is a vector with the $i$th entry referring to the ELPD for observation $i$. 
+
+
+
+# Question 5: splines fit (extra credit)
+
+Fit a splines model in brm and redo the posterior predictive checks to see if this model improves upon models 1 and/or 2.
+
+
+
+

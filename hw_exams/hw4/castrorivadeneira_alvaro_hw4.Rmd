@@ -1,0 +1,657 @@
+---
+title: "Applied Bayesian modeling - HW4, part 1"
+author: "Álvaro J. Castro Rivadeneira"
+date: "November 2, 2022"
+header-includes:
+    - \usepackage{bm}
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+In this HW, we are going to analyze the wells data (briefly mentioned in class) using logistic regression models, and do model checking. HW4-part1 is based on module 11, part 1 (in-sample checking). Later parts of this analysis include approximate leave-one-out validation and testing sensitivity of results to choice of priors.
+
+If you'd like a refresher on logistic regression, and want to read about it in a Bayesian context, you may find these texts helpful (do add others you recommend on the slack!):
+
+- https://bookdown.org/marklhc/notes_bookdown/generalized-linear-models.html#binary-logistic-regression
+- https://www.bayesrulesbook.com/chapter-13.html
+
+
+For model fitting, you can choose if you want to fit the models using the brms or rstan package functions (or both!).
+Either way, you will need to investigate how to fit a logistic regression model. Consider using help functions (i.e. check out the family option in brm), consider the resources, and/or do a google search for vignettes or tutorials to do logistic regression with brm or stan.
+
+Choice of priors will be discussed further in part 2. A default recommendation (based on centered covariates) varies across references but generally, distributions with fatter tails (as compared to normal densities) are recommended, such as a t-distribution. 
+For part 1 of the HW, when using brm, you may use brm-default priors (based on centered covariates, the default here is to use a student_t(3, 0, 2.5) for the intercept, flat priors are used for other coefficients). When using stan, you may use the same priors, or consider a student\_t(df = 7, location = 0, scale = 2.5), as recommended here https://avehtari.github.io/modelselection/diabetes.html.
+
+For all model fits, include centered covariates (i.e. subtract the mean of the covariate) and make sure Rhat and effectve sample sizes don't suggest any issues. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+library(tidyverse)
+library(bayesplot) 
+# when using bayesplot, I got some errors that resolved when adding theme_classic. 
+
+# consider using 
+library(brms)
+# or
+library(rstan)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+# additional libraries
+library(plyr)
+# library(rstanarm)
+```
+
+# Wells data 
+
+Information taken from https://cran.r-project.org/web/packages/rstanarm/vignettes/binomial.html. 
+The data are described here https://vincentarelbundock.github.io/Rdatasets/doc/carData/Wells.html
+
+Gelman and Hill describe a survey of 3200 residents in a small area of Bangladesh suffering from arsenic contamination of groundwater. Respondents with elevated arsenic levels in their wells had been encouraged to switch their water source to a safe public or private well in the nearby area and the survey was conducted several years later to learn which of the affected residents had switched wells. The goal of the analysis presented by Gelman and Hill is to learn about the factors associated with switching wells.
+
+Reading in the data and creating some transformed variables:
+
+```{r}
+url <- "http://stat.columbia.edu/~gelman/arm/examples/arsenic/wells.dat"
+wells <- read.table(url)
+wells <- wells %>%
+  # adding some transformed and centered variables 
+  mutate(y = switch, 
+         dist100 = dist / 100, 
+         # rescale the dist variable (measured in meters) so that it is measured in units of 100 meters
+        c_dist100 = dist100 - mean (dist100),
+        c_arsenic = arsenic - mean (arsenic))
+```
+
+A simple plot: blue bars correspond to the 1737 residents who said they switched wells and darker bars show the distribution of dist100 for the 1283 residents who didn’t switch. As we would expect, for the residents who switched wells, the distribution of dist100 is more concentrated at smaller distances.
+
+```{r}
+ggplot(wells, aes(x = dist100, y = ..density.., fill = switch == 1)) +
+  geom_histogram() + 
+  scale_fill_manual(values = c("gray30", "skyblue"))
+```
+
+# Question 1: fitting a logistic regression model (warm-up exercise)
+
+Fit the following simple logistic regression model:
+\begin{eqnarray*}
+	y_i &\sim& Bern(\theta_i),\\
+	logit(\theta_i) &=& \beta_0 + \beta_1 \cdot (d_i - \bar{d}),
+\end{eqnarray*}
+where $y_i=1$ if household $i$ switched wells , 0 otherwise (recorded by the variable \texttt{switch}  in the dataset), $\theta_i$ refers to its probability of switching and $d_i$ to its distance to the nearest safe well (measured in 100 meters, \texttt{dist100}  in the well dataset). 
+	
+Report point estimates and 95\% CIs for $\beta_0$ and $\beta_1$. Interpret these estimates in terms of odds ratios.  
+
+**Answer**  
+
+First, I like to get a sense of the distribution of the data:
+```{r}
+# First a look at all the data
+summary(wells)
+# Now, a different, simple plot to look at differences in switch
+mus <- ddply(wells, "switch", summarise, grp.mean=mean(dist))
+mus
+ggplot(wells, aes(x=dist, color=as.factor(switch))) + 
+  geom_density() + 
+  geom_vline(data=mus, aes(xintercept=grp.mean, color=as.factor(switch)),
+             linetype="dashed")
+# Finally, I like to run a traditional glm to compare results:
+hw4q.glm.fit_1 <- glm(y ~ 1 + c_dist100, data = wells, family = "binomial")
+summary(hw4q.glm.fit_1)
+cbind(Estimate = coef(hw4q.glm.fit_1), confint(hw4q.glm.fit_1))
+exp(cbind(OR = coef(hw4q.glm.fit_1), confint(hw4q.glm.fit_1)))
+# Check non-centered results for comparison
+hw4q.glm.fit_2 <- glm(y ~ 1 + dist100, data = wells, family = "binomial")
+summary(hw4q.glm.fit_2)
+cbind(Estimate = coef(hw4q.glm.fit_2), confint(hw4q.glm.fit_2))
+exp(cbind(OR = coef(hw4q.glm.fit_2), confint(hw4q.glm.fit_2)))
+# Find OR for d = d_bar using the second fit (should = first intercept OR)
+dist100_bar <- mean(wells$dist100)
+beta_0 <- coef(hw4q.glm.fit_2)[1]
+beta_1 <- coef(hw4q.glm.fit_2)[2]
+(or_d_bar <- exp(beta_0 + (dist100_bar * beta_1)))
+# The results are what was expected!
+```
+  
+Now to fit a model with one predictor:
+```{r}
+t_prior <- set_prior("student_t(7, 0, 2.5)", class = "Intercept")
+
+hw4q1.fit <- brm(formula = y ~ 1 + c_dist100, 
+                 file = "output/hw4q1", 
+                 data = wells, sample_prior = T, 
+                 prior = c(t_prior), 
+                 family = bernoulli(link = "logit"), 
+                 chains = 4, iter = 2000, warmup = 1000, 
+                 cores = getOption("mc.cores", 4), 
+                 thin = 1, seed = 1234)
+```
+  
+Now, the point estimates and 95% CIs for $\beta_0$ and $\beta_1$:
+```{r}
+# Reviewing output and diagnostics
+summary(hw4q1.fit)
+summary(hw4q1.fit)$fixed
+# Intercept and coefficients
+fixef(hw4q1.fit)
+(beta_0 <- fixef(hw4q1.fit)[1])
+(or_zerodist <- exp(beta_0))
+(p_zerodist <- exp(beta_0) / (1 + exp(beta_0)))
+# Check results using plogis
+plogis(fixef(hw4q1.fit)[1])
+# Results match what was expected
+```
+  
+The 95% CI for $\beta_0$ is 0.233 - 0.375 and the 95% CI for $\beta_1$ is -0.811 - -0.436. To interpret these results we need to exponentiate them:
+```{r}
+exp(fixef(hw4q1.fit)[,-2])
+```
+  
+It is worth noting these results are almost identical to what I obtained with a traditional frequentist logistic regression.  
+
+The interpretation for $\beta_0$ in terms of the odds ratio is that participants who live at exactly the mean distance from the closest known safe well (so that $(d_i - \bar d) = 0$) have 1.36 times the odds (or a 57.6% probability) of switching to another well from an unsafe well (95% CI for OR: 1.26 - 1.45). On the other hand, for $\beta_1$ we can say that for every 100 meters away from the mean distance to to the closest known safe well ($(d_i - \bar d) = 1$), the odds of switching to another well from an unsafe well is 0.54 (95% CI for OR: 0.44 - 0.65). Stated differently, for every 100 meters further away from the closest known safe well, they have a 46% decrease in the odds of making a switch to another well from an unsafe well.  
+
+# Question 2: Models with distance and arsenic 
+
+Now consider models that include a second predictor, which is the arsenic level in the respondents' well (called \texttt{arsenic}  in the dataset). Fit model (2), which has distance/100 and arsenic levels as predictors, as well as model (3), which has both predictors and their interaction term.
+
+Write out the equations for both models, and construct one plot that shows the relation between the estimated switch probability and arsenic levels for both models for households  that are 100 meters away from a safe well (use posterior means of the regression coefficients and show the model with the interaction term in a dashed red line). Interpret the difference between the fitted regression lines.  
+
+**Answer**  
+
+The probability $\theta_i$ of making a switch $y_i$ for both models is given by:
+$$y_i \sim Bern(\theta_i),$$
+Model (2) would have the following equation:
+$$logit(\theta_i) = \beta_0 + \beta_1 \cdot (d_i - \bar d) + \beta_2 \cdot (a_i - \bar a),$$
+Model (3) would have the following equation:
+$$logit(\theta_i) = \beta_0 + \beta_1 \cdot (d_i - \bar d) + \beta_2 \cdot (a_i - \bar a) + \beta_3 \cdot (d_i - \bar d) \cdot (a_i - \bar a),$$
+Now, to fit model (2):
+```{r}
+hw4q2_2.fit <- brm(formula = y ~ 1 + c_dist100 + c_arsenic, 
+                 file = "output/hw4q2_2", 
+                 data = wells, sample_prior = T, 
+                 prior = c(t_prior), 
+                 family = bernoulli(link = "logit"), 
+                 chains = 4, iter = 2000, warmup = 1000, 
+                 cores = getOption("mc.cores", 4), 
+                 thin = 1, seed = 1234)
+```
+  
+...and a fit for model (3):
+```{r}
+hw4q2_3.fit <- brm(formula = y ~ 1 + c_dist100 * c_arsenic, 
+                 file = "output/hw4q2_3", 
+                 data = wells, sample_prior = T, 
+                 prior = c(t_prior), 
+                 family = bernoulli(link = "logit"), 
+                 chains = 4, iter = 2000, warmup = 1000, 
+                 cores = getOption("mc.cores", 4), 
+                 thin = 1, seed = 1234)
+```
+  
+Now to look at and compare the results from both models:
+```{r}
+# Reviewing output and diagnostics
+summary(hw4q2_2.fit)
+summary(hw4q2_3.fit)
+# Fixed effects
+summary(hw4q2_2.fit)$fixed
+summary(hw4q2_3.fit)$fixed
+# Intercept and coefficients
+fixef(hw4q2_2.fit)
+fixef(hw4q2_3.fit)
+exp(fixef(hw4q2_2.fit)[,-2])
+exp(fixef(hw4q2_3.fit)[,-2])
+```
+  
+Finally, a plot that shows the relation between the estimated switch probability and arsenic levels for both models for households that are 100 meters away from a safe well. Basing myself on the `rstanarm` vignette:
+```{r}
+# Predicted probability as a function of x
+pr_switch_2 <- function(x, y, ests) plogis(ests[1] + ests[2] * x + ests[3] * y)
+pr_switch_3 <- function(x, y, ests) plogis(ests[1] + ests[2] * x + ests[3] * y + (ests[4] * x * y))
+# A function to slightly jitter the binary data
+jitt <- function(...) {
+  geom_point(aes_string(...), position = position_jitter(height = 0.05, width = 0.1), 
+             size = 2, shape = 21, stroke = 0.2)
+}
+# Set the centered distance value as 100 meters away from a safe well
+d.is.100 <- (1 - dist100_bar)
+# The plot
+ggplot(wells, aes(x = c_arsenic, y = switch, color = switch)) + 
+  scale_y_continuous(breaks = c(0, 0.5, 1)) +
+  jitt(x="c_arsenic") + 
+  stat_function(fun = pr_switch_2, args = list(x = d.is.100, ests = fixef(hw4q2_2.fit)), 
+                size = 1, color = "gray35") + 
+  stat_function(fun = pr_switch_3, args = list(x = d.is.100, ests = fixef(hw4q2_3.fit)), 
+                size = 1, color = "red", linetype = "dashed")
+# Check to see plotted results match what we expect when c_arsenic = 4
+c_As.is.3 <- 3
+# First, for model (2), use estimates obtained previously (should be above 0.75):
+(p2.As.is.3 <- plogis(0.3339635 + (-0.9009966 * d.is.100) + (0.4632278 * c_As.is.3)))
+# Answer: 0.7787021
+# First, for model (3), use estimates obtained previously (should be slightly below 0.75):
+(p3.As.is.3 <- plogis(0.3514297 + (-0.8759479 * d.is.100) + (0.4710138 * c_As.is.3) + (-0.1826818 * d.is.100 * c_As.is.3)))
+# Answer: 0.7366677
+# The results seem reasonable and correct.
+```
+  
+I want to check my work and make sure I'm doing this correctly:
+```{r}
+# First I will run a traditional GLM to see if I get similar results
+# Model (2)
+hw4q2_2.glm.fit_1 <- glm(y ~ 1 + c_dist100 + c_arsenic, data = wells, family = "binomial")
+summary(hw4q2_2.glm.fit_1)
+cbind(Estimate = coef(hw4q2_2.glm.fit_1), confint(hw4q2_2.glm.fit_1))
+exp(cbind(OR = coef(hw4q2_2.glm.fit_1), confint(hw4q2_2.glm.fit_1)))
+# Very similar results
+## Not centered Model (2)
+hw4q2_2.glm.fit_2 <- glm(y ~ 1 + dist100 + arsenic, data = wells, family = "binomial")
+summary(hw4q2_2.glm.fit_2)
+cbind(Estimate = coef(hw4q2_2.glm.fit_2), confint(hw4q2_2.glm.fit_2))
+exp(cbind(OR = coef(hw4q2_2.glm.fit_2), confint(hw4q2_2.glm.fit_2)))
+# Using non-centered data I get a different intercept, but the same coefficients for variables
+# Model (3)
+hw4q2_3.glm.fit_1 <- glm(y ~ 1 + c_dist100 * c_arsenic, data = wells, family = "binomial")
+summary(hw4q2_3.glm.fit_1)
+cbind(Estimate = coef(hw4q2_3.glm.fit_1), confint(hw4q2_3.glm.fit_1))
+exp(cbind(OR = coef(hw4q2_3.glm.fit_1), confint(hw4q2_3.glm.fit_1)))
+# Very similar results
+# Not centered Model (3)
+hw4q2_3.glm.fit_2 <- glm(y ~ 1 + dist100 * arsenic, data = wells, family = "binomial")
+summary(hw4q2_3.glm.fit_2)
+cbind(Estimate = coef(hw4q2_3.glm.fit_2), confint(hw4q2_3.glm.fit_2))
+exp(cbind(OR = coef(hw4q2_3.glm.fit_2), confint(hw4q2_3.glm.fit_2)))
+# Using non-centered results, only the interaction coefficient is the same in both models
+# Now a plot using the centered coefficients
+ggplot(wells, aes(x = c_arsenic, y = switch, color = switch)) + 
+  scale_y_continuous(breaks = c(0, 0.5, 1)) +
+  jitt(x="c_arsenic") + 
+  stat_function(fun = pr_switch_2, args = list(x = d.is.100, ests = coef(hw4q2_2.glm.fit_1)), 
+                size = 1, color = "gray35") + 
+  stat_function(fun = pr_switch_3, args = list(x = d.is.100, ests = coef(hw4q2_3.glm.fit_1)), 
+                size = 1, color = "red", linetype = "dashed")
+# Now a plot using the non-centered coefficients
+ggplot(wells, aes(x = arsenic, y = switch, color = switch)) + 
+  scale_y_continuous(breaks = c(0, 0.5, 1)) +
+  jitt(x="arsenic") + 
+  stat_function(fun = pr_switch_2, args = list(x = 1, ests = coef(hw4q2_2.glm.fit_2)), 
+                size = 1, color = "gray35") + 
+  stat_function(fun = pr_switch_3, args = list(x = 1, ests = coef(hw4q2_3.glm.fit_2)), 
+                size = 1, color = "red", linetype = "dashed")
+# They look exactly the same. I am fairly confident in my results
+```
+  
+Interpretation: In both models, increasing concentrations of arsenic lead to increasing probability of switching to another well from an unsafe well. In fact, the coefficient for `c_arsenic`, $\beta_2$ is essentially identical in both models ($0.46$ and $0.47$). This coefficient means that an increase in arsenic is associated with an increased possibility of switching wells. Nonetheless, the interaction term between arsenic and distance has the opposite effect,as it has a negative coefficient ($-0.18$). When multiplied by $(d_i - \bar d) = 0.52$, and then exponentiated, it equals $0.91$. This means that it has the effect of decreasing the slope, and thus, reducing odds of switching wells as the arsenic concentration increases. The effect is rather small, but it is evident in the red dashed line which starts higher than Model (2), but then reduces as the concentration of arsenic increases. In other words, Model(3) reduces the magnitude of change of the probability of switching wells as the concentration of arsenic increases.  
+
+# Question 3: Residual plots 
+
+Produce residual plots for model 3, to show how residuals in that model vary with distance and arsenic. 
+Start by calculating the residuals as discussed in module 11.
+
+**Answer**  
+Following the examples given in the lecture and module 11, first we calculate the residuals:
+```{r}
+ynew_si <- posterior_predict(hw4q2_3.fit) # adding si to indicate the dimension used
+dim(ynew_si)
+ytildehat_i <- apply(ynew_si, 2, mean)
+length(ytildehat_i)
+res <- wells$y - ytildehat_i
+summary(res)
+```
+  
+Now for some plots:
+```{r}
+# First a plot of residuals agains distance
+plot(res ~ wells$dist, col=ifelse(res>0, "blue","red"), pch=4)
+lines(lowess(res ~ wells$dist))
+abline(h=0, lty=5, col="black")
+```
+  
+Plotting the residuals against well distance, we see the two groups of residuals, that are given since $y_i$ can only be zero or one, whereas $\hat{\tilde y_i}$ is an average, and as such, is between zero or one, so the residuals are grouped depending on whether $y_i$ is zero or one. Nonetheless, by plotting with `lowess` and thus, weighting the residuals, we see the line is very close to zero, meaning the residuals do not vary much with distance.  
+
+Now, to plot the residuals against arsenic concentration:
+```{r}
+plot(res ~ wells$arsenic, col=ifelse(res>0, "blue","red"), pch=4)
+lines(lowess(res ~ wells$arsenic))
+abline(h=0, lty=5, col="black")
+```
+  
+The line is close to zero, although it does tend downwards as the concentration of arsenic increases. Nonetheless, since the data is sparse at far distances, this may simply be driven by a handful of outliers.  
+
+**Back to the quesion**  
+
+Then, because this is logistic regression with binary outcomes, consider how to best display the residuals. 
+Note that just plotting residuals will not result in an informative plot because the $y$'s are binary.  
+
+**Alvaro comment:** That said, by using `lowess`, we get a better sense of how they are distributed.  
+
+You may be able to find better resources but in case it's still helpful, in my pre-tidyverse and ggplot life, I have used a function from GH for plotting residuals
+```{r}
+#----
+# function for binned residual plots from GH
+#-----
+binned.resids <- function (x, # what to bin over? 
+                           y, # what to bin, eg. residuals
+                           nclass=sqrt(length(x))){
+  breaks.index <- floor(length(x)*(1:(nclass-1))/nclass)
+  breaks <- c (-Inf, sort(x)[breaks.index], Inf)
+  output <- NULL
+  xbreaks <- NULL
+  x.binned <- as.numeric (cut (x, breaks))
+  for (i in 1:nclass){
+    items <- (1:length(x))[x.binned==i]
+    x.range <- range(x[items])
+    xbar <- mean(x[items])
+    ybar <- mean(y[items])
+    n <- length(items)
+    sdev <- sd(y[items])
+    output <- rbind (output, c(xbar, ybar, n, x.range, 2*sdev/sqrt(n)))
+  }
+  colnames (output) <- c ("xbar", "ybar", "n", "x.lo", "x.hi", "2se")
+  return (list (binned=output, xbreaks=xbreaks))
+}
+
+
+```
+  
+Example use for made up residuals
+
+```{r}
+n <- length(wells$y)
+resid <-  runif(n, -1,1)# just making up something 
+result <- data.frame(binned.resids(wells$arsenic, resid)$binned)
+plot(range(result$xbar), range(result$ybar,result$X2se, -result$X2se), 
+     ylab="Average residual", type="n", xlab = "arsenic")
+abline (0,0, col="gray", lwd=.5)
+lines (result$xbar, result$X2se, col="gray", lwd=.5)
+lines (result$xbar, -result$X2se, col="gray", lwd=.5)
+points (result$xbar,result$ybar, pch=19, cex=.5)
+```
+  
+**Answer**  
+Now, let me try, first for distance:
+```{r}
+n <- length(wells$y)
+resid <- res
+result <- data.frame(binned.resids(wells$dist, res)$binned)
+plot(range(result$xbar), range(result$ybar,result$X2se, -result$X2se), 
+     ylab="Average residual", type="n", xlab = "distance")
+abline (0,0, col="black", lwd=.5, lty=5)
+lines (result$xbar, result$X2se, col="darkgray", lwd=.5)
+lines (result$xbar, -result$X2se, col="darkgray", lwd=.5)
+points (result$xbar,result$ybar, pch=19, cex=.5)
+lines(lowess(res ~ wells$dist))
+```
+  
+There are five points (out of 54) outside the error bars, which means 90% are within our error margins. There is no obvious pattern, and the results seem reasonable. Now, a different kind of plot:
+```{r}
+pp_check(hw4q2_3.fit, type = "error_binned", ndraws = 9, x="c_dist100") + theme_classic()
+```
+  
+Similarly to before, most observations seem to be within the error bars, with no obvious pattern.  
+
+Now, for the arsenic plots:
+```{r}
+n <- length(wells$y)
+resid <- res
+result <- data.frame(binned.resids(wells$arsenic, res)$binned)
+plot(range(result$xbar), range(result$ybar,result$X2se, -result$X2se), 
+     ylab="Average residual", type="n", xlab = "arsenic")
+abline (0,0, col="black", lwd=.5, lty=5)
+lines (result$xbar, result$X2se, col="darkgray", lwd=.5)
+lines (result$xbar, -result$X2se, col="darkgray", lwd=.5)
+points (result$xbar,result$ybar, pch=19, cex=.5)
+lines(lowess(res ~ wells$arsenic))
+```
+  
+There are six points (out of 54) outside the error bars, which means roughly 90% are within our error margins. As was mentioned before, there seems to be an increase and then gradual decrease in the residuals (as viewed with `lowess`), but the line seems close enough to zero to be reasonable. Even so, at the lowest values of arsenic, it does seem the model is overpredicting the probability of a switch (given by the very negative residuals), since the lowest points are far below the error bars.  
+
+Now, a different kind of plot:
+```{r}
+pp_check(hw4q2_3.fit, type = "error_binned", ndraws = 9, x="c_arsenic") + theme_classic()
+```
+  
+This looks almost identical to the previous `pp_check` plot, and I'm not convinced it is plotting by variables correctly, so I will refrain from any interpretation.    
+
+# Question 4: Posterior predictive check
+
+The fit of model (3) is not great for low values of arsenic: the probability of switching is overpredicted at very low arsenic levels. To improve model diagnostics, let's consider another model (model 4) where arsenic levels are log-transformed:
+	\begin{eqnarray*}
+		y_i &\sim& Bern(p_i),\\
+		logit(p_i) &=& \beta_0 + \beta_1 \cdot (d_i - \bar{d}) + \beta_2 \cdot (a^*_i - \bar{a}^*_i)+\beta_3 \cdot (d_i - \bar{d})(a^*_i - \bar{a}^*), \text{ for model 4}
+	\end{eqnarray*}
+where $a_i^*$ refers to log-transformed arsenic.
+
+Suppose that one of the outcomes of interest in this study is predicting whether or not a household that is using a well with ``unsafe but relatively low arsenic levels'' (say arsenic levels up to 0.82, which is the 25th percentile of the observed sample of arsenic values) will switch. Carry out a posterior predictive check to verify whether model (3) with arsenic and/or model (4) with log(arsenic) give a reasonable prediction for the proportion of switching households (with arsenic levels less than 0.82).
+
+Hint: specify a summary statistic $T(\bm{y})$ that summarizes the outcome of interest and calculate $T(\bm{y})$ for the data set. Then construct replicated data sets $\tilde{\bm{y}}^{(s)}$ with summary statistics $T(\tilde{\bm{y}}^{(s)})$ and evaluate how extreme $T(\bm{y})$ is compared to the sample of  $T(\tilde{\bm{y}}^{(s)})$'s.
+
+**Answer**  
+First, I will create a centered, log-transformed arsenic variable:
+```{r}
+wells <- wells %>% 
+  mutate(log_As = log(arsenic), 
+         c_log_As = log_As - mean(log_As))
+summary(wells[,10:11])
+hist(wells$c_log_As, breaks = 30, freq = FALSE)
+lines(density(wells$c_log_As), col = "red")
+# Not exactly a uniform distribution - there are a few extreme outliers with very high values for log(As)
+```
+  
+Now, to fit the model:
+```{r}
+hw4q4.fit <- brm(formula = y ~ 1 + c_dist100 * c_log_As, 
+                 file = "output/hw4q4", 
+                 data = wells, sample_prior = T, 
+                 prior = c(t_prior), 
+                 family = bernoulli(link = "logit"), 
+                 chains = 4, iter = 2000, warmup = 1000, 
+                 cores = getOption("mc.cores", 4), 
+                 thin = 1, seed = 1234)
+```
+  
+Now the results:
+```{r}
+# Reviewing output and diagnostics
+summary(hw4q4.fit)
+# Fixed effects
+summary(hw4q4.fit)$fixed
+# Intercept and coefficients
+fixef(hw4q4.fit)
+exp(fixef(hw4q4.fit)[,-2])
+```
+  
+It's helpful to look at the residuals:
+```{r}
+ynew_si <- posterior_predict(hw4q4.fit)
+dim(ynew_si)
+ytildehat_i <- apply(ynew_si, 2, mean)
+length(ytildehat_i)
+res <- wells$y - ytildehat_i
+summary(res)
+```
+  
+First residual plot:
+```{r}
+# First a plot of residuals agains distance
+plot(res ~ wells$arsenic, col=ifelse(res>0, "blue","red"), pch=4)
+lines(lowess(res ~ wells$arsenic))
+abline(h=0, lty=5, col="black")
+```
+  
+The line fit does look better than before, now for a plot of the binned residuals:
+```{r}
+n <- length(wells$y)
+resid <- res
+result <- data.frame(binned.resids(wells$arsenic, res)$binned)
+plot(range(result$xbar), range(result$ybar,result$X2se, -result$X2se), 
+     ylab="Average residual", type="n", xlab = "arsenic")
+abline (0,0, col="black", lwd=.5, lty=5)
+lines (result$xbar, result$X2se, col="darkgray", lwd=.5)
+lines (result$xbar, -result$X2se, col="darkgray", lwd=.5)
+points (result$xbar,result$ybar, pch=19, cex=.5)
+lines(lowess(res ~ wells$arsenic))
+```
+  
+Most values now lie within the error bars, although there still are two extreme values at low arsenic levels. So, we seem to have improved the prediction somewhat, although the shape and pattern is similar to the normal arsenic values.  
+
+Now, on to the posterior predictive check. First, as per the suggestion, I will use a summary statistic $T(\bf{y})$ to summarize the outcome of interest. Namely:
+$$T(\bf{y}) = (\bar \theta | arsenic < 0.82)$$
+In my dataset this is given by:
+```{r}
+small_As <- wells %>% filter(arsenic < 0.82)
+(T_y <- mean(small_As$y))
+# 0.4338336
+```
+  
+Now, replicated datasets for comparison and estimated $T(\bf{y})$s:
+```{r}
+set.seed(1234)
+
+# Model (3)
+ynew_si_3 <- posterior_predict(hw4q2_3.fit, newdata = small_As)
+dim(ynew_si_3)
+ytildehat_i_3 <- apply(ynew_si_3, 2, mean)
+length(ytildehat_i_3)
+(T_y_3 <- mean(ytildehat_i_3))
+# 0.4918704
+# What percentile would the real mean fall in a distribution of our sampled means?
+(ecdf(ytildehat_i_3)(T_y))
+# 0.111869 - the 11th percentile, which is getting to the tail of our distribution
+
+# Model (4)
+ynew_si_4 <- posterior_predict(hw4q4.fit, newdata = small_As)
+dim(ynew_si_4)
+ytildehat_i_4 <- apply(ynew_si_4, 2, mean)
+length(ytildehat_i_4)
+(T_y_4 <- mean(ytildehat_i_4))
+# 0.4459986
+# What percentile does the real mean fall in Model (4)
+(ecdf(ytildehat_i_4)(T_y))
+# 0.3560709 - the 36th percentile, which is much better
+```
+  
+Now, for some plots:
+```{r}
+set.seed(1234)
+# Model (3)
+select_samp_3 <- sample(1:dim(ynew_si_3)[1], 50)
+ppc_dens_overlay(y = small_As$y, yrep = ynew_si_3[select_samp_3, ]) + theme_classic()
+# Model (4)
+select_samp_4 <- sample(1:dim(ynew_si_4)[1], 50)
+ppc_dens_overlay(y = small_As$y, yrep = ynew_si_4[select_samp_4, ]) + theme_classic()
+```
+  
+For Model (3), the repetitions don't quite match the truth - underpredicting those who don't switch and overpredicting those who do switch. The difference is notable and dramatic. Model (4) shows a more even distribution on both sides of the real values, implying that Model (4) is a better fit for low values of arsenic.  
+
+Now, to check the distribution of sample means in both models compared to the mean in the `wells` dataset:
+```{r}
+# Model (3)
+hist(ytildehat_i_3, breaks = 30, freq = FALSE)
+lines(density(ytildehat_i_3), col = "red")
+abline(v = T_y, col = "purple", lwd = 4)
+```
+  
+As seen previously, this line lies towards the tail of our distribution of means.
+```{r}
+# Model (4)
+hist(ytildehat_i_4, breaks = 30, freq = FALSE)
+lines(density(ytildehat_i_4), col = "red")
+abline(v = T_y, col = "purple", lwd = 4)
+```
+  
+Here the real mean lies much closer to the center of the distribution of our sampled means.
+
+Conclusion: Model (4) gives a *much* better prediction for the proportion of switching households than Model (3).  
+
+#  Question 5: Multilevel logistic regression (extra credit)
+
+According to GH 14.6 (Q2), the observations are obtained in different villages, which makes for a nice extension of the logistic regression  model into a multilevel logistic regression model. However, I was not able to find the village grouping in the data sets provided online. To not deprive you from this nice extension and let you fit a multilevel logistic model, go ahead and construct your own groupings as follows:  
+
+```{r}
+set.seed(12345)
+n <- length(wells$y)
+# assign households to villages
+J <- 300
+getj1_i <- c(seq(1,J), sample(size = n-J, x = seq(1,J), replace = TRUE))
+getj2_i <- sort(getj1_i) # now the households are assumed to be sorted by village
+```
+  
+where the first grouping (summarized in `getj1.i') is random while in the second grouping, the households are grouped in the order at which they appear in the dataset.  
+		
+Write out in equations an extension for model (2), where each group has its own intercept, that is estimated hierarchically. Then fit the model, using both groupings (so fit the same model twice). 
+
+Comment on the difference in resulting fits between using grouping 1 and grouping 2. In particular, do you have any thoughts on why the across-village variance in intercept is smaller for the 1st grouping as compared to the second grouping?
+
+**Answer**  
+The question asks us to write equations for models with different intercepts, but not slopes, and so I will limit myself to differences in the intercept.
+$$y_i | \theta_i \sim Bern(\theta_i),$$
+$$logit(\theta_i) = \alpha_{j[i]} + \beta_1 \cdot (d_i - \bar d) + \beta_2 \cdot (a_i - \bar a),$$
+$$\alpha_j | \mu_\alpha, \sigma_\alpha \sim N(\mu_\alpha, \sigma_\alpha)$$
+Now, to fit the the model for grouping 1, Model g1, first I should organize the data:
+```{r}
+wells_g1 <- wells %>% add_column(village = getj1_i)
+```
+  
+Now, to fit the model:
+```{r}
+hw4q5_1.fit <- brm(formula = y ~ (1 | village) + c_dist100 + c_arsenic, 
+                   file = "output/hw4q5_1", 
+                   data = wells_g1, sample_prior = T, 
+                   prior = c(t_prior), 
+                   family = bernoulli(link = "logit"), 
+                   chains = 4, iter = 2000, warmup = 1000, 
+                   cores = getOption("mc.cores", 4), 
+                   thin = 1, seed = 1234)
+```
+  
+Now the results:
+```{r}
+# Reviewing output and diagnostics
+summary(hw4q5_1.fit)
+# Fixed effects
+summary(hw4q5_1.fit)$fixed
+# Intercept and coefficients
+fixef(hw4q5_1.fit)
+exp(fixef(hw4q5_1.fit)[,-2])
+```
+  
+The results are very similar to what we obtained with Model (2), although the variance is slightly larger in Model g1.  
+
+Now for the second grouping, Model g2:
+```{r}
+wells_g2 <- wells %>% add_column(village = getj2_i)
+```
+  
+Now, to fit the model:
+```{r}
+hw4q5_2.fit <- brm(formula = y ~ (1 | village) + c_dist100 + c_arsenic, 
+                   file = "output/hw4q5_2", 
+                   data = wells_g2, sample_prior = T, 
+                   prior = c(t_prior), 
+                   family = bernoulli(link = "logit"), 
+                   chains = 4, iter = 2000, warmup = 1000, 
+                   cores = getOption("mc.cores", 4), 
+                   thin = 1, seed = 1234)
+```
+  
+Now the results:
+```{r}
+# Reviewing output and diagnostics
+summary(hw4q5_2.fit)
+# Fixed effects
+summary(hw4q5_2.fit)$fixed
+# Intercept and coefficients
+fixef(hw4q5_2.fit)
+exp(fixef(hw4q5_2.fit)[,-2])
+```
+  
+The results here are relatively similar to those of Model (2) and Model g1, but the most important difference is at the level of the intercept $\mu_\alpha$. It is much bigger than the other two models (0.42 vs 0.33, 0.34), and the standard error is twice as big (0.08 vs. 0.04). The reason is that the data are probably not organized in random fashion, and so, by grouping "villages" in the order they appear on the dataset, they are being non-randomly assigned to different villages. This means that the group means will also vary more than those that are completely random (because random allocation will lead to less variance), and this will be picked up by the hierarchical model. That is also why the between-group (village) standard deviation is *much* larger in model g2 (almost six times as large: 1.03 vs 0.18), since the group means are different in a meaningful way because of the non-random allocation.
+
+In summary, neighboring rows are more similar to each other than random rows, which means that group means will cluster in patterns that differentiate them, and make them more different between each other. This means more between group variance, but also means the standard error for the intercept is larger.  
+
